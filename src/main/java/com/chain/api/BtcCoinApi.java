@@ -1,6 +1,5 @@
 package com.chain.api;
 
-
 import com.google.gson.Gson;
 import wf.bitcoin.javabitcoindrpcclient.BitcoinJSONRPCClient;
 import wf.bitcoin.javabitcoindrpcclient.BitcoindRpcClient;
@@ -11,6 +10,11 @@ import java.net.MalformedURLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class BtcCoinApi implements BlockChainApi {
 
@@ -20,20 +24,21 @@ public class BtcCoinApi implements BlockChainApi {
 
     private static String URL = "http://btc:btc@127.0.0.1:18888/";
 
-    //检查并返回转入的数值
+    // 检查并返回转入的数值
     private static BigDecimal checkIfTargetTx(String address, BitcoindRpcClient.RawTransaction transaction) {
 
         if (transaction.vOut() != null && transaction.vOut().size() > 0) {
             for (int i = 0; i < transaction.vOut().size(); i++) {
                 BitcoindRpcClient.RawTransaction.Out out = transaction.vOut().get(i);
-                if (out.scriptPubKey() != null && out.scriptPubKey().addresses() != null && out.scriptPubKey().addresses().size() > 0) {
+                if (out.scriptPubKey() != null && out.scriptPubKey().addresses() != null
+                        && out.scriptPubKey().addresses().size() > 0) {
                     for (String s : out.scriptPubKey().addresses()) {
 
                         if (s.equals(address)) {
                             System.out.println((new Gson()).toJson(transaction));
                             return out.value();
                         }
-//                        return out.value();
+                        // return out.value();
                     }
                 }
             }
@@ -41,17 +46,17 @@ public class BtcCoinApi implements BlockChainApi {
 
         return null;
     }
+
     private static BtcCoinApi instance;
 
-
     public static String rpcUrl = "http://btc:btc@127.0.0.1:18888/";
+
     public static BtcCoinApi getInstance() {
         if (instance == null) {
             instance = new BtcCoinApi();
         }
         return instance;
     }
-
 
     BitcoinJSONRPCClient bitcoinClient;
 
@@ -93,30 +98,31 @@ public class BtcCoinApi implements BlockChainApi {
 
     @Override
     public Long getConfirmedBlock(String txId) {
-        BitcoindRpcClient.RawTransaction transaction =  bitcoinClient.getRawTransaction(txId);
+        BitcoindRpcClient.RawTransaction transaction = bitcoinClient.getRawTransaction(txId);
         return transaction.confirmations().longValue();
     }
 
-//    @Override
-//    public TransactionInfo getTx(String txId) {
-//
-//        return null;
-//    }
+    // @Override
+    // public TransactionInfo getTx(String txId) {
+    //
+    // return null;
+    // }
 
-    public TransactionInfo wrapperTransaction(BitcoindRpcClient.Block block, BitcoindRpcClient.RawTransaction transaction, BigDecimal value) {
+    public TransactionInfo wrapperTransaction(BitcoindRpcClient.Block block,
+            BitcoindRpcClient.RawTransaction transaction, BigDecimal value) {
 
         System.out.println((new Gson()).toJson(block) + " +++ " + (new Gson()).toJson(transaction));
 
         TransactionInfo transactionInfo = new TransactionInfo();
-        //块高度
+        // 块高度
         transactionInfo.setBlockNumber(BigInteger.valueOf(block.height()));
         transactionInfo.setValue(String.valueOf(value));
         transactionInfo.setTxId(transaction.txId());
-        //用户地址
+        // 用户地址
         transactionInfo.setToken("BTC");
         transactionInfo.setDecimal(18);
         // -1 冲突 0=待打包 >0 打包成功
-        Integer status = transaction.confirmations() ;
+        Integer status = transaction.confirmations();
         if (transaction.confirmations() > 0) {
             status = 1;
         }
@@ -163,13 +169,13 @@ public class BtcCoinApi implements BlockChainApi {
             }
 
             Long currentMaxHeight = getBlockNumber();
-            //判断传入的最大高度是否大于链的最大高度
+            // 判断传入的最大高度是否大于链的最大高度
             if (currentMaxHeight < maxHeight) {
-               maxHeight = currentMaxHeight;
-               end = maxHeight;
+                maxHeight = currentMaxHeight;
+                end = maxHeight;
             }
 
-            //如果只传入一个高度,无需循环高度
+            // 如果只传入一个高度,无需循环高度
             if (isSingleHeight == 1) {
 
                 BitcoindRpcClient.Block block = bitcoinClient.getBlock(maxHeight.intValue());
@@ -191,22 +197,43 @@ public class BtcCoinApi implements BlockChainApi {
         return list;
     }
 
-    private List<TransactionInfo> handleBlockTransactions(List<TransactionInfo> list, BitcoindRpcClient.Block block, String address) {
+    static ExecutorService fixedThreadPool = Executors.newFixedThreadPool(50);
+    private List<TransactionInfo> handleBlockTransactions(List<TransactionInfo> list, BitcoindRpcClient.Block block,
+            String address) {
         if (block != null) {
+            List<Future<TransactionInfo>> futures = new ArrayList<Future<TransactionInfo>>();
             List<String> txs = block.tx();
             for (String tx : txs) {
-                BitcoindRpcClient.RawTransaction transaction = bitcoinClient.getRawTransaction(tx);
-                BigDecimal value = checkIfTargetTx(address, transaction);
-                //符合地址条件
-                if (value != null) {
-                    TransactionInfo transactionInfo = wrapperTransaction(block, transaction, value);
-                    list.add(transactionInfo);
+                futures.add(fixedThreadPool.submit(new Callable<TransactionInfo>() {
+                    @Override
+                    public TransactionInfo call() throws Exception {
+                        BitcoindRpcClient.RawTransaction transaction = bitcoinClient.getRawTransaction(tx);
+                        BigDecimal value = checkIfTargetTx(address, transaction);
+                        // 符合地址条件
+                        if (value != null) {
+                            TransactionInfo transactionInfo = wrapperTransaction(block, transaction, value);
+                            // list.add(transactionInfo);
+                            return transactionInfo;
+                        }
+                        return null;
+                    }
+                }));
+            }
+
+            for (Future<TransactionInfo> future : futures) {
+                TransactionInfo tx;
+                try {
+                    tx = future.get();
+                    if (tx != null) {
+                        list.add(tx);
+                    }
+                } catch (InterruptedException | ExecutionException e) {
+                    e.printStackTrace();
                 }
             }
         }
         return list;
     }
-
 
     @Override
     public void initToken(Map<String, TokenInfo> tokens) {
