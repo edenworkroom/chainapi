@@ -11,29 +11,49 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class EthCoinApi implements BlockChainApi {
 
     private static final String URL = "http://127.0.0.1:8545/";
 
+    static ExecutorService fixedThreadPool = Executors.newFixedThreadPool(50);
     public List<TransactionInfo> handleBlockTransactions(List<TransactionInfo> list, EthBlock ethBlock, String address, Map<String, TokenInfo> wantedToken) {
         if (ethBlock != null && ethBlock.getBlock() != null) {
             List<EthBlock.TransactionResult> result = ethBlock.getBlock().getTransactions();
 
             if (result != null) {
+                List<Future<TransactionInfo>> futures = new ArrayList<Future<TransactionInfo>>();
                 for (EthBlock.TransactionResult transactionResult : result) {
                     Transaction tx = (Transaction) transactionResult;
-                    TransactionInfo targetTransaction = null;
+                    futures.add(fixedThreadPool.submit(new Callable<TransactionInfo>(){
+                        @Override
+                        public TransactionInfo call() throws Exception {
+                            TransactionInfo targetTransaction = null;
+                            try {
+                                targetTransaction = isTargetTransaction(admin, address, wantedToken, tx);
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                            return targetTransaction;
+                        }
+                    }));
+                }
+
+                for (Future<TransactionInfo> future : futures) {
+                    TransactionInfo tx;
                     try {
-                        targetTransaction = isTargetTransaction(admin, address, wantedToken, tx);
-                    } catch (IOException e) {
+                        tx = future.get();
+                        if (tx != null) {
+                            list.add(tx);
+                        }
+                    } catch (InterruptedException | ExecutionException e) {
                         e.printStackTrace();
                     }
-
-                    if (targetTransaction != null) {
-                        list.add(targetTransaction);
-                    }
-
                 }
             }
         }
@@ -77,38 +97,39 @@ public class EthCoinApi implements BlockChainApi {
         BigInteger value = tx.getValue();
         String token = "ETH";
         Integer decimals = 18;
-        String realTransactionTarget = "";
         String inputStr = tx.getInput().toLowerCase();
 
-        if (isNotEmpty(to) && wantedToken.containsKey(to)) {
-            TokenInfo tokenInfo = wantedToken.get(to);
-            token = tokenInfo.getTokenName();
-            decimals = tokenInfo.getDecimal();
-
-            /**前10位代表操作， 在ERC20中 0xa9059cbb 0x23b872dd 表示两种转账 */
-            String pre10CharActions = inputStr.substring(0, 10);
-            if ("0xa9059cbb".equals(pre10CharActions)) {
-                realTransactionTarget = "0x" + inputStr.substring(34, 74);
-                value = BigInteger.valueOf(Long.parseLong(inputStr.substring(74), 16));
-            } else if ("0x23b872dd".equals(pre10CharActions)) {
-                from = "0x" + inputStr.substring(34, 74);
-                realTransactionTarget = "0x" + inputStr.substring(98, 138);
-                value = BigInteger.valueOf(Long.valueOf(inputStr.substring(138), 16));
-            } else {
-                return null;
+        if (isNotEmpty(to)) {
+            if(wantedToken.containsKey(to)) {
+                TokenInfo tokenInfo = wantedToken.get(to);
+                token = tokenInfo.getTokenName();
+                decimals = tokenInfo.getDecimal();
+    
+                /**前10位代表操作， 在ERC20中 0xa9059cbb 0x23b872dd 表示两种转账 */
+                String pre10CharActions = inputStr.substring(0, 10);
+                if ("0xa9059cbb".equals(pre10CharActions)) {
+                    to = "0x" + inputStr.substring(34, 74);
+                    value = BigInteger.valueOf(Long.parseLong(inputStr.substring(74), 16));
+                } else if ("0x23b872dd".equals(pre10CharActions)) {
+                    from = "0x" + inputStr.substring(34, 74);
+                    to = "0x" + inputStr.substring(98, 138);
+                    value = BigInteger.valueOf(Long.valueOf(inputStr.substring(138), 16));
+                } else {
+                    return null;
+                }
             }
-
-            if (realTransactionTarget.equals(address.toLowerCase())) {
+           
+            if (to.equals(address.toLowerCase())) {
                 TransactionInfo transactionInfo = new TransactionInfo();
                 transactionInfo.setBlockNumber(tx.getBlockNumber());
                 transactionInfo.setFee(tx.getGasPrice().multiply(tx.getGas()));
                 transactionInfo.setFromPk(from);
                 transactionInfo.setToken(token);
-                transactionInfo.setToPk(realTransactionTarget);
+                transactionInfo.setToPk(to);
                 transactionInfo.setTxId(tx.getHash());
                 transactionInfo.setValue(String.valueOf(value));
                 transactionInfo.setStatus(0);
-                transactionInfo.setDecimal(tokenInfo.getDecimal());
+                transactionInfo.setDecimal(decimals);
 
                 EthGetTransactionReceipt ethGetTransactionReceipt = admin.ethGetTransactionReceipt(tx.getHash()).send();
 
